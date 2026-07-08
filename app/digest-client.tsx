@@ -71,7 +71,29 @@ function CandleChart({ card }: { card: DigestCard }) {
     | { kind: "ready"; data: CandleResp }
   >({ kind: "loading" });
   const [hover, setHover] = useState<{ i: number; x: number } | null>(null);
+  // y-domain auto-fitted to the candles currently visible in the scroll
+  // viewport — rescales as you scroll, like a real trading chart.
+  const [view, setView] = useState<{ lo: number; hi: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const rafRef = useRef<number>(0);
+
+  const fitVisible = useCallback((candles: Candle[]) => {
+    const el = scrollRef.current;
+    if (!el || candles.length === 0) return;
+    const slot = CANDLE_W + CANDLE_GAP;
+    const i0 = Math.max(0, Math.floor(el.scrollLeft / slot));
+    const i1 = Math.min(candles.length - 1, Math.ceil((el.scrollLeft + el.clientWidth) / slot));
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = i0; i <= i1; i++) {
+      const c = candles[i];
+      if (c.l < lo) lo = c.l;
+      if (c.h > hi) hi = c.h;
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return;
+    const pad = (hi - lo) * 0.08 || hi * 0.005 || 1;
+    setView({ lo: lo - pad, hi: hi + pad });
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -94,12 +116,13 @@ function CandleChart({ card }: { card: DigestCard }) {
     };
   }, [card]);
 
-  // Start scrolled to the latest candles.
+  // Start scrolled to the latest candles, then fit the y-axis to them.
   useEffect(() => {
     if (state.kind === "ready" && scrollRef.current) {
       scrollRef.current.scrollLeft = scrollRef.current.scrollWidth;
+      fitVisible(state.data.candles);
     }
-  }, [state]);
+  }, [state, fitVisible]);
 
   if (state.kind === "loading") {
     return <div className="skeleton w-full" style={{ height: CH }} />;
@@ -121,12 +144,15 @@ function CandleChart({ card }: { card: DigestCard }) {
   const width = Math.max(n * slot + 8, 320);
   const plotH = CH - PAD_TOP - PAD_BOT;
 
-  let lo = Infinity;
-  let hi = -Infinity;
+  // Fall back to the full-range domain until the first visible-window fit.
+  let fullLo = Infinity;
+  let fullHi = -Infinity;
   for (const c of candles) {
-    if (c.l < lo) lo = c.l;
-    if (c.h > hi) hi = c.h;
+    if (c.l < fullLo) fullLo = c.l;
+    if (c.h > fullHi) fullHi = c.h;
   }
+  const lo = view?.lo ?? fullLo;
+  const hi = view?.hi ?? fullHi;
   const span = hi - lo || hi * 0.01 || 1;
   const y = (p: number) => PAD_TOP + plotH - ((p - lo) / span) * plotH;
 
@@ -165,7 +191,7 @@ function CandleChart({ card }: { card: DigestCard }) {
             </span>
           </>
         ) : (
-          <span>hover for OHLC · range {fmtTick(lo)} – {fmtTick(hi)}</span>
+          <span>hover for OHLC · visible range {fmtTick(lo)} – {fmtTick(hi)} · scroll for history</span>
         )}
       </div>
 
@@ -174,6 +200,10 @@ function CandleChart({ card }: { card: DigestCard }) {
           ref={scrollRef}
           className="overflow-x-auto rounded-lg border"
           style={{ borderColor: "var(--border)", background: "var(--bg)" }}
+          onScroll={() => {
+            cancelAnimationFrame(rafRef.current);
+            rafRef.current = requestAnimationFrame(() => fitVisible(candles));
+          }}
         >
           <svg
             width={width}
@@ -213,9 +243,18 @@ function CandleChart({ card }: { card: DigestCard }) {
               </text>
             ))}
 
+            <defs>
+              <clipPath id="candle-plot-clip">
+                <rect x={0} y={0} width={width} height={CH - PAD_BOT + 2} />
+              </clipPath>
+            </defs>
+
             {/* candlesticks — wick spans high→low, body spans open→close.
                 Up: hollow green (outline). Down: solid red. Color + fill style
-                together, so direction never rides on hue alone. */}
+                together, so direction never rides on hue alone. Clipped to the
+                plot area: off-window candles may fall outside the fitted
+                y-domain while scrolling. */}
+            <g clipPath="url(#candle-plot-clip)">
             {candles.map((c, i) => {
               const up = c.c >= c.o;
               const color = up ? UP : DOWN;
@@ -252,6 +291,7 @@ function CandleChart({ card }: { card: DigestCard }) {
                 </g>
               );
             })}
+            </g>
 
             {/* crosshair */}
             {hover && (
