@@ -20,6 +20,7 @@ export type DigestCard = {
   id: string;
   symbol: string;
   name: string;
+  coingecko_id: string | null;
   signal_type: string;
   severity: string;
   score: number;
@@ -39,14 +40,14 @@ export type Digest = {
   last_run_at: string | null;
 };
 
-export async function getDigest(limit = 10): Promise<Digest> {
+export async function getDigest(limit = 20): Promise<Digest> {
   const db = createAdminClient();
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
 
   const { data: signals, error } = await db
     .from("signals")
     .select(
-      "id, signal_type, severity, score, summary, summary_source, summary_confidence, triggered_at, token_id, tokens(symbol, name)",
+      "id, signal_type, severity, score, summary, summary_source, summary_confidence, triggered_at, token_id, tokens(symbol, name, coingecko_id)",
     )
     .gte("triggered_at", sevenDaysAgo)
     .order("score", { ascending: false })
@@ -61,32 +62,48 @@ export async function getDigest(limit = 10): Promise<Digest> {
     seen.add(r.token_id);
     return true;
   }).slice(0, limit);
-  const tokenIds = [...new Set(rows.map((r) => r.token_id).filter(Boolean))];
+  const signalTokenIds = new Set(rows.map((r) => r.token_id));
 
-  // Latest snapshot per token.
+  // Latest snapshot per token — ALL tokens from the most recent scan, so the
+  // digest can fill remaining slots with the day's biggest movers.
   const latestSnap = new Map<
     string,
-    { price_usd: number | null; price_change_24h_pct: number | null; volume_24h: number | null }
+    {
+      price_usd: number | null;
+      price_change_24h_pct: number | null;
+      volume_24h: number | null;
+      token: { symbol: string; name: string; coingecko_id: string | null } | null;
+    }
   >();
-  if (tokenIds.length > 0) {
+  {
+    const dayAgo = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
     const { data: snaps } = await db
       .from("token_snapshots")
-      .select("token_id, price_usd, price_change_24h_pct, volume_24h, fetched_at")
-      .in("token_id", tokenIds)
-      .order("fetched_at", { ascending: false });
+      .select(
+        "token_id, price_usd, price_change_24h_pct, volume_24h, fetched_at, tokens(symbol, name, coingecko_id)",
+      )
+      .gte("fetched_at", dayAgo)
+      .order("fetched_at", { ascending: false })
+      .limit(600);
     for (const s of snaps ?? []) {
-      if (!latestSnap.has(s.token_id)) {
+      if (s.token_id && !latestSnap.has(s.token_id)) {
         latestSnap.set(s.token_id, {
           price_usd: s.price_usd,
           price_change_24h_pct: s.price_change_24h_pct,
           volume_24h: s.volume_24h,
+          token: (s.tokens as unknown as {
+            symbol: string;
+            name: string;
+            coingecko_id: string | null;
+          } | null),
         });
       }
     }
   }
 
-  // Recent news per token (Pro detail).
+  // Recent news per token (detail panel).
   const newsByToken = new Map<string, NewsSnippet[]>();
+  const tokenIds = [...signalTokenIds];
   if (tokenIds.length > 0) {
     const { data: news } = await db
       .from("news_items")
@@ -118,12 +135,17 @@ export async function getDigest(limit = 10): Promise<Digest> {
     .maybeSingle();
 
   const cards: DigestCard[] = rows.map((r) => {
-    const token = r.tokens as unknown as { symbol: string; name: string } | null;
+    const token = r.tokens as unknown as {
+      symbol: string;
+      name: string;
+      coingecko_id: string | null;
+    } | null;
     const snap = latestSnap.get(r.token_id);
     return {
       id: r.id,
       symbol: token?.symbol ?? "—",
       name: token?.name ?? "Unknown",
+      coingecko_id: token?.coingecko_id ?? null,
       signal_type: r.signal_type,
       severity: r.severity,
       score: Number(r.score),
@@ -137,6 +159,39 @@ export async function getDigest(limit = 10): Promise<Digest> {
       news: newsByToken.get(r.token_id) ?? [],
     };
   });
+
+  // Fill remaining slots with the day's biggest movers (no abnormal signal —
+  // just honest market data), ranked by |24h change|.
+  if (cards.length < limit) {
+    const movers = [...latestSnap.entries()]
+      .filter(([id, s]) => !signalTokenIds.has(id) && s.token && s.price_change_24h_pct != null)
+      .sort(
+        (a, b) =>
+          Math.abs(b[1].price_change_24h_pct ?? 0) - Math.abs(a[1].price_change_24h_pct ?? 0),
+      )
+      .slice(0, limit - cards.length);
+    for (const [id, s] of movers) {
+      const pct = s.price_change_24h_pct ?? 0;
+      const dir = pct >= 0 ? "up" : "down";
+      cards.push({
+        id: `mover-${id}`,
+        symbol: s.token!.symbol,
+        name: s.token!.name,
+        coingecko_id: s.token!.coingecko_id,
+        signal_type: "market_mover",
+        severity: "low",
+        score: Math.min(29, Math.round(Math.abs(pct))),
+        summary: `${s.token!.symbol} is ${dir} ${Math.abs(pct).toFixed(2)}% in 24h — no abnormal signal, but among today's biggest movers.`,
+        summary_source: "rule-based",
+        summary_confidence: null,
+        triggered_at: new Date().toISOString(),
+        price_usd: s.price_usd,
+        price_change_24h_pct: s.price_change_24h_pct,
+        volume_24h: s.volume_24h,
+        news: [],
+      });
+    }
+  }
 
   return {
     cards,

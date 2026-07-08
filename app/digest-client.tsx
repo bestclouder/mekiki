@@ -1,9 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Digest, DigestCard } from "@/lib/digest";
-import { createClient } from "@/lib/supabase/client";
 
 // ── formatting helpers ────────────────────────────────────────────────────
 function fmtPrice(n: number | null): string {
@@ -35,12 +33,230 @@ const BADGES: Record<string, { label: string; color: string; bg: string }> = {
   volume_spike: { label: "Volume", color: "var(--violet)", bg: "rgba(167,139,250,0.12)" },
   price_move: { label: "Price", color: "var(--cyan)", bg: "rgba(34,211,238,0.12)" },
   news_event: { label: "News", color: "var(--warn)", bg: "rgba(251,191,36,0.12)" },
+  market_mover: { label: "Mover", color: "var(--text-muted)", bg: "rgba(154,161,171,0.12)" },
 };
 
 function scoreColor(score: number): string {
   if (score >= 75) return "var(--pos)";
   if (score >= 50) return "var(--warn)";
   return "var(--text-muted)";
+}
+
+// ── candle chart ────────────────────────────────────────────────────────────
+type Candle = { t: number; o: number; h: number; l: number; c: number };
+type CandleResp = { candles: Candle[]; granularity: string; source: string };
+
+const CH = 240; // chart height (px)
+const PAD_TOP = 10;
+const PAD_BOT = 22; // room for time labels
+const CANDLE_W = 4; // body width
+const CANDLE_GAP = 1;
+
+function fmtTick(price: number): string {
+  if (price >= 1000) return price.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  if (price >= 1) return price.toFixed(2);
+  return price.toPrecision(3);
+}
+function fmtTime(t: number): string {
+  const d = new Date(t);
+  return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function CandleChart({ card }: { card: DigestCard }) {
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "error"; message: string }
+    | { kind: "ready"; data: CandleResp }
+  >({ kind: "loading" });
+  const [hover, setHover] = useState<{ i: number; x: number } | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const q = new URLSearchParams();
+        q.set("symbol", card.symbol);
+        if (card.coingecko_id) q.set("id", card.coingecko_id);
+        const res = await fetch(`/api/candles?${q}`);
+        const data = await res.json();
+        if (!alive) return;
+        if (res.ok && data.candles?.length) setState({ kind: "ready", data });
+        else setState({ kind: "error", message: data.error ?? "No chart data." });
+      } catch {
+        if (alive) setState({ kind: "error", message: "Chart data fetch failed." });
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [card]);
+
+  // Start scrolled to the latest candles.
+  useEffect(() => {
+    if (state.kind === "ready" && scrollRef.current) {
+      scrollRef.current.scrollLeft = scrollRef.current.scrollWidth;
+    }
+  }, [state]);
+
+  if (state.kind === "loading") {
+    return <div className="skeleton w-full" style={{ height: CH }} />;
+  }
+  if (state.kind === "error") {
+    return (
+      <div
+        className="w-full flex items-center justify-center rounded-lg border border-dashed text-sm"
+        style={{ height: CH, borderColor: "var(--border-strong)", color: "var(--text-muted)" }}
+      >
+        {state.message}
+      </div>
+    );
+  }
+
+  const { candles, granularity, source } = state.data;
+  const n = candles.length;
+  const slot = CANDLE_W + CANDLE_GAP;
+  const width = Math.max(n * slot + 8, 320);
+  const plotH = CH - PAD_TOP - PAD_BOT;
+
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const c of candles) {
+    if (c.l < lo) lo = c.l;
+    if (c.h > hi) hi = c.h;
+  }
+  const span = hi - lo || hi * 0.01 || 1;
+  const y = (p: number) => PAD_TOP + plotH - ((p - lo) / span) * plotH;
+
+  // ~4 clean horizontal gridlines.
+  const ticks = [0, 1, 2, 3].map((i) => lo + (span * i) / 3);
+  // Time labels every ~1/4 of the range.
+  const timeIdx = [0, 1, 2, 3].map((i) => Math.min(n - 1, Math.floor((n - 1) * (i / 3))));
+
+  const hovered = hover ? candles[hover.i] : null;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-[10px] uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>
+          {granularity === "5m" ? "5-min candles · last 48h" : "hourly · last 48h (no 5-min feed for this token)"}
+        </span>
+        <span className="text-[10px]" style={{ color: "var(--text-faint)" }}>
+          {source}
+        </span>
+      </div>
+
+      {/* fixed OHLC readout — no layout jump on hover */}
+      <div className="flex gap-3 text-[11px] tabular-nums mb-1.5 flex-wrap" style={{ color: "var(--text-muted)" }}>
+        {hovered ? (
+          <>
+            <span>{fmtTime(hovered.t)}</span>
+            <span>O {fmtTick(hovered.o)}</span>
+            <span>H {fmtTick(hovered.h)}</span>
+            <span>L {fmtTick(hovered.l)}</span>
+            <span style={{ color: hovered.c >= hovered.o ? "var(--pos)" : "var(--neg)" }}>
+              C {fmtTick(hovered.c)}
+            </span>
+          </>
+        ) : (
+          <span>hover for OHLC · range {fmtTick(lo)} – {fmtTick(hi)}</span>
+        )}
+      </div>
+
+      <div className="relative">
+        <div
+          ref={scrollRef}
+          className="overflow-x-auto rounded-lg border"
+          style={{ borderColor: "var(--border)", background: "var(--bg)" }}
+        >
+          <svg
+            width={width}
+            height={CH}
+            style={{ display: "block" }}
+            onMouseMove={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const x = e.clientX - rect.left;
+              const i = Math.max(0, Math.min(n - 1, Math.floor(x / slot)));
+              setHover({ i, x: i * slot + CANDLE_W / 2 });
+            }}
+            onMouseLeave={() => setHover(null)}
+          >
+            {/* hairline gridlines */}
+            {ticks.map((p) => (
+              <line
+                key={p}
+                x1={0}
+                x2={width}
+                y1={y(p)}
+                y2={y(p)}
+                stroke="var(--border)"
+                strokeWidth={1}
+              />
+            ))}
+
+            {/* time labels along the bottom */}
+            {timeIdx.map((i, k) => (
+              <text
+                key={k}
+                x={Math.min(i * slot + 2, width - 74)}
+                y={CH - 7}
+                fontSize={9}
+                fill="var(--text-faint)"
+              >
+                {fmtTime(candles[i].t)}
+              </text>
+            ))}
+
+            {/* candles */}
+            {candles.map((c, i) => {
+              const up = c.c >= c.o;
+              const color = up ? "var(--pos)" : "var(--neg)";
+              const cx = i * slot + CANDLE_W / 2;
+              const bodyTop = y(Math.max(c.o, c.c));
+              const bodyH = Math.max(1, Math.abs(y(c.o) - y(c.c)));
+              return (
+                <g key={c.t}>
+                  <line x1={cx} x2={cx} y1={y(c.h)} y2={y(c.l)} stroke={color} strokeWidth={1} />
+                  <rect x={i * slot} y={bodyTop} width={CANDLE_W} height={bodyH} fill={color} />
+                </g>
+              );
+            })}
+
+            {/* crosshair */}
+            {hover && (
+              <line
+                x1={hover.x}
+                x2={hover.x}
+                y1={PAD_TOP}
+                y2={CH - PAD_BOT}
+                stroke="var(--text-faint)"
+                strokeWidth={1}
+                strokeDasharray="none"
+                opacity={0.6}
+              />
+            )}
+          </svg>
+        </div>
+
+        {/* price axis pinned over the right edge */}
+        <div className="absolute top-0 right-0 h-full pointer-events-none pr-1.5">
+          {ticks.map((p) => (
+            <span
+              key={p}
+              className="absolute right-1.5 text-[9px] tabular-nums px-1 rounded"
+              style={{
+                top: PAD_TOP + (CH - PAD_TOP - PAD_BOT) - ((p - lo) / span) * (CH - PAD_TOP - PAD_BOT) - 6,
+                color: "var(--text-muted)",
+                background: "color-mix(in srgb, var(--bg) 75%, transparent)",
+              }}
+            >
+              {fmtTick(p)}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ── card ──────────────────────────────────────────────────────────────────
@@ -65,7 +281,8 @@ function Card({
   return (
     <div
       style={{ background: "var(--bg-elev)", borderColor: "var(--border)" }}
-      className="rounded-xl border p-4 sm:p-5 flex gap-4 transition-colors hover:border-[var(--border-strong)]"
+      className="rounded-xl border p-4 sm:p-5 flex gap-4 transition-colors hover:border-[var(--border-strong)] cursor-pointer"
+      onClick={() => onDetails(card)}
     >
       <div className="flex flex-col items-center pt-1 w-8 shrink-0">
         <span className="text-xs font-semibold" style={{ color: "var(--text-faint)" }}>
@@ -120,23 +337,23 @@ function Card({
             </span>
           )}
           <span className="tabular-nums">Vol {fmtVol(card.volume_24h)}</span>
+          {conf != null && (
+            <span
+              className="px-2 py-0.5 rounded-full"
+              style={{
+                color: isAI ? "var(--accent)" : "var(--text-muted)",
+                background: isAI ? "var(--accent-soft)" : "var(--bg-elev-2)",
+              }}
+            >
+              {isAI ? "AI" : "Rule"} · {conf}% confident
+            </span>
+          )}
           <span
-            className="px-2 py-0.5 rounded-full"
-            style={{
-              color: isAI ? "var(--accent)" : "var(--text-muted)",
-              background: isAI ? "var(--accent-soft)" : "var(--bg-elev-2)",
-            }}
-          >
-            {isAI ? "AI" : "Rule"}
-            {conf != null ? ` · ${conf}% confident` : ""}
-          </span>
-          <button
-            onClick={() => onDetails(card)}
             className="ml-auto text-xs font-medium px-3 py-1 rounded-lg border transition-colors hover:bg-[var(--bg-elev-2)]"
             style={{ borderColor: "var(--border-strong)", color: "var(--text)" }}
           >
             See details →
-          </button>
+          </span>
         </div>
       </div>
     </div>
@@ -160,59 +377,19 @@ function SkeletonCard() {
   );
 }
 
-// ── Pro gate modal ──────────────────────────────────────────────────────────
+// ── detail modal (open to everyone) ─────────────────────────────────────────
 function fmtDetail(card: DigestCard) {
   return [
     { label: "Score", value: `${card.score} / 100` },
     { label: "Severity", value: card.severity },
-    { label: "Signal", value: card.signal_type.replace("_", " ") },
+    { label: "Signal", value: card.signal_type.replace(/_/g, " ") },
     { label: "Price", value: fmtPrice(card.price_usd) },
     { label: "24h change", value: fmtPct(card.price_change_24h_pct) },
     { label: "24h volume", value: fmtVol(card.volume_24h) },
-    {
-      label: "Confidence",
-      value:
-        card.summary_confidence != null
-          ? `${Math.round(card.summary_confidence * 100)}% (${card.summary_source})`
-          : "—",
-    },
   ];
 }
 
-function ProModal({
-  card,
-  isPro,
-  onClose,
-}: {
-  card: DigestCard;
-  isPro: boolean;
-  onClose: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-
-  const upgrade = useCallback(async () => {
-    setBusy(true);
-    setMsg(null);
-    try {
-      const res = await fetch("/api/checkout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ signalId: card.id, symbol: card.symbol }),
-      });
-      const data = await res.json();
-      if (res.ok && data.url) {
-        window.location.href = data.url;
-        return;
-      }
-      setMsg(data.error ?? "Checkout unavailable. Try again later.");
-    } catch {
-      setMsg("Network error starting checkout.");
-    } finally {
-      setBusy(false);
-    }
-  }, [card]);
-
+function DetailModal({ card, onClose }: { card: DigestCard; onClose: () => void }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -220,47 +397,43 @@ function ProModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-2xl border p-6"
+        className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl border p-6"
         style={{ background: "var(--bg-elev)", borderColor: "var(--border-strong)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-semibold">
-            {card.symbol} · full signal detail
+            {card.symbol}
+            <span className="ml-2 text-sm font-normal" style={{ color: "var(--text-muted)" }}>
+              {card.name}
+            </span>
           </h3>
           <button onClick={onClose} style={{ color: "var(--text-muted)" }} className="text-xl leading-none">
             ×
           </button>
         </div>
 
-        {isPro ? (
-          <div className="mt-4 space-y-4">
-            <span
-              className="inline-block text-[11px] font-semibold px-2 py-0.5 rounded-full"
-              style={{ color: "var(--accent)", background: "var(--accent-soft)" }}
-            >
-              PRO · unlocked
-            </span>
-            <p className="text-sm leading-relaxed">{card.summary}</p>
-            <div className="grid grid-cols-2 gap-2">
-              {fmtDetail(card).map((d) => (
-                <div key={d.label} className="rounded-lg border p-2.5" style={{ borderColor: "var(--border)" }}>
-                  <div className="text-[10px] uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>
-                    {d.label}
-                  </div>
-                  <div className="text-sm font-medium mt-0.5 capitalize">{d.value}</div>
+        <div className="mt-4 space-y-5">
+          <CandleChart card={card} />
+
+          <p className="text-sm leading-relaxed">{card.summary}</p>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {fmtDetail(card).map((d) => (
+              <div key={d.label} className="rounded-lg border p-2.5" style={{ borderColor: "var(--border)" }}>
+                <div className="text-[10px] uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>
+                  {d.label}
                 </div>
-              ))}
-            </div>
+                <div className="text-sm font-medium mt-0.5 capitalize">{d.value}</div>
+              </div>
+            ))}
+          </div>
+
+          {card.news.length > 0 && (
             <div>
               <div className="text-[10px] uppercase tracking-wide mb-1" style={{ color: "var(--text-faint)" }}>
                 Related news
               </div>
-              {card.news.length === 0 && (
-                <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-                  No recent news items for this token.
-                </p>
-              )}
               <div className="space-y-2">
                 {card.news.map((n, i) => (
                   <a
@@ -281,47 +454,8 @@ function ProModal({
                 ))}
               </div>
             </div>
-          </div>
-        ) : (
-          <>
-            {/* Blurred teaser of the gated content */}
-            <div className="mt-4 relative">
-              <div className="space-y-2 select-none" style={{ filter: "blur(5px)", pointerEvents: "none" }}>
-                <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-                  Raw evidence: volume ratio, exact price move, matched keywords.
-                </p>
-                {(card.news.length ? card.news : [{ headline: "Latest related headline preview", url: null, source: "news", keywords: [], published_at: null }]).map(
-                  (n, i) => (
-                    <div key={i} className="text-sm rounded-lg border p-3" style={{ borderColor: "var(--border)" }}>
-                      {n.headline}
-                    </div>
-                  ),
-                )}
-              </div>
-              <div className="absolute inset-0 flex flex-col items-center justify-center text-center gap-2">
-                <span className="text-2xl">🔒</span>
-                <p className="text-sm font-medium">Pro unlocks full evidence + news snippets</p>
-              </div>
-            </div>
-
-            <button
-              onClick={upgrade}
-              disabled={busy}
-              className="mt-5 w-full py-2.5 rounded-xl font-medium transition-opacity disabled:opacity-60"
-              style={{ background: "var(--accent)", color: "white" }}
-            >
-              {busy ? "Starting checkout…" : "Upgrade to Pro"}
-            </button>
-            {msg && (
-              <p className="mt-3 text-xs text-center" style={{ color: "var(--warn)" }}>
-                {msg}
-              </p>
-            )}
-            <p className="mt-3 text-[11px] text-center" style={{ color: "var(--text-faint)" }}>
-              Test mode · card 4242 4242 4242 4242
-            </p>
-          </>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );
@@ -334,36 +468,6 @@ export default function DigestClient({ initial }: { initial: Digest }) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modal, setModal] = useState<DigestCard | null>(null);
-  const [isPro, setIsPro] = useState(false);
-  const [canceled, setCanceled] = useState(false);
-  const [email, setEmail] = useState<string | null>(null);
-
-  useEffect(() => {
-    setIsPro(localStorage.getItem("mekiki_pro") === "1");
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("checkout") === "canceled") setCanceled(true);
-
-    // Reflect real auth + subscription state from the DB when signed in.
-    const supabase = createClient();
-    supabase.auth.getUser().then(async ({ data: { user } }) => {
-      if (!user) return;
-      setEmail(user.email ?? null);
-      const { data } = await supabase
-        .from("subscriptions")
-        .select("tier")
-        .eq("user_id", user.id)
-        .eq("tier", "pro")
-        .limit(1);
-      if (data && data.length > 0) setIsPro(true);
-    });
-  }, []);
-
-  const signOut = useCallback(async () => {
-    const supabase = createClient();
-    await supabase.auth.signOut();
-    localStorage.removeItem("mekiki_pro");
-    window.location.reload();
-  }, []);
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -411,14 +515,6 @@ export default function DigestClient({ initial }: { initial: Digest }) {
             </div>
           </div>
           <div className="ml-auto flex items-center gap-3">
-            {isPro && (
-              <span
-                className="text-[11px] font-semibold px-2 py-0.5 rounded-full"
-                style={{ color: "var(--accent)", background: "var(--accent-soft)" }}
-              >
-                PRO
-              </span>
-            )}
             <span className="text-xs hidden sm:inline" style={{ color: "var(--text-faint)" }}>
               scanned {scannedLabel}
             </span>
@@ -431,28 +527,6 @@ export default function DigestClient({ initial }: { initial: Digest }) {
               <span className={refreshing ? "spin inline-block" : "inline-block"}>↻</span>
               {refreshing ? "Scanning…" : "Refresh"}
             </button>
-            {email ? (
-              <>
-                <span className="text-xs hidden md:inline max-w-[120px] truncate" style={{ color: "var(--text-muted)" }}>
-                  {email}
-                </span>
-                <button
-                  onClick={signOut}
-                  className="text-sm px-3 py-1.5 rounded-lg border transition-colors"
-                  style={{ borderColor: "var(--border-strong)", color: "var(--text-muted)" }}
-                >
-                  Sign out
-                </button>
-              </>
-            ) : (
-              <Link
-                href="/login"
-                className="text-sm font-medium px-3 py-1.5 rounded-lg border transition-colors"
-                style={{ borderColor: "var(--border-strong)" }}
-              >
-                Sign in
-              </Link>
-            )}
           </div>
         </div>
       </header>
@@ -461,19 +535,9 @@ export default function DigestClient({ initial }: { initial: Digest }) {
         <div className="mb-5">
           <h2 className="text-xl font-semibold">Today&apos;s movers</h2>
           <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
-            Ranked signals across abnormal volume, price swings, and news — scanned daily, refresh live anytime.
+            Top 20 from the latest scan — abnormal volume, price swings, and news first, biggest movers after.
           </p>
         </div>
-
-        {canceled && (
-          <div
-            className="mb-4 rounded-lg border px-4 py-3 text-sm flex items-center justify-between"
-            style={{ borderColor: "var(--border-strong)", background: "var(--bg-elev)", color: "var(--text-muted)" }}
-          >
-            <span>Checkout canceled — no charge was made.</span>
-            <button onClick={() => setCanceled(false)} style={{ color: "var(--text-faint)" }}>×</button>
-          </div>
-        )}
 
         {error && (
           <div
@@ -521,11 +585,11 @@ export default function DigestClient({ initial }: { initial: Digest }) {
         )}
 
         <footer className="mt-10 pt-6 border-t text-center text-xs" style={{ borderColor: "var(--border)", color: "var(--text-faint)" }}>
-          Market data from CoinGecko · Signals are rule-based, not financial advice
+          Market data from CoinGecko &amp; Binance · Signals are rule-based, not financial advice
         </footer>
       </main>
 
-      {modal && <ProModal card={modal} isPro={isPro} onClose={() => setModal(null)} />}
+      {modal && <DetailModal card={modal} onClose={() => setModal(null)} />}
     </div>
   );
 }
