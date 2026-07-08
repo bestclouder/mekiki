@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Digest, DigestCard } from "@/lib/digest";
 
 // ── formatting helpers ────────────────────────────────────────────────────
@@ -159,11 +159,31 @@ function SkeletonCard() {
 }
 
 // ── Pro gate modal ──────────────────────────────────────────────────────────
+function fmtDetail(card: DigestCard) {
+  return [
+    { label: "Score", value: `${card.score} / 100` },
+    { label: "Severity", value: card.severity },
+    { label: "Signal", value: card.signal_type.replace("_", " ") },
+    { label: "Price", value: fmtPrice(card.price_usd) },
+    { label: "24h change", value: fmtPct(card.price_change_24h_pct) },
+    { label: "24h volume", value: fmtVol(card.volume_24h) },
+    {
+      label: "Confidence",
+      value:
+        card.summary_confidence != null
+          ? `${Math.round(card.summary_confidence * 100)}% (${card.summary_source})`
+          : "—",
+    },
+  ];
+}
+
 function ProModal({
   card,
+  isPro,
   onClose,
 }: {
   card: DigestCard;
+  isPro: boolean;
   onClose: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -211,42 +231,95 @@ function ProModal({
           </button>
         </div>
 
-        {/* Blurred teaser of the gated content */}
-        <div className="mt-4 relative">
-          <div className="space-y-2 select-none" style={{ filter: "blur(5px)", pointerEvents: "none" }}>
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-              Raw evidence: volume ratio, exact price move, matched keywords.
-            </p>
-            {(card.news.length ? card.news : [{ headline: "Latest related headline preview", url: null, source: "news", keywords: [], published_at: null }]).map(
-              (n, i) => (
-                <div key={i} className="text-sm rounded-lg border p-3" style={{ borderColor: "var(--border)" }}>
-                  {n.headline}
+        {isPro ? (
+          <div className="mt-4 space-y-4">
+            <span
+              className="inline-block text-[11px] font-semibold px-2 py-0.5 rounded-full"
+              style={{ color: "var(--accent)", background: "var(--accent-soft)" }}
+            >
+              PRO · unlocked
+            </span>
+            <p className="text-sm leading-relaxed">{card.summary}</p>
+            <div className="grid grid-cols-2 gap-2">
+              {fmtDetail(card).map((d) => (
+                <div key={d.label} className="rounded-lg border p-2.5" style={{ borderColor: "var(--border)" }}>
+                  <div className="text-[10px] uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>
+                    {d.label}
+                  </div>
+                  <div className="text-sm font-medium mt-0.5 capitalize">{d.value}</div>
                 </div>
-              ),
-            )}
+              ))}
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wide mb-1" style={{ color: "var(--text-faint)" }}>
+                Related news
+              </div>
+              {card.news.length === 0 && (
+                <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                  No recent news items for this token.
+                </p>
+              )}
+              <div className="space-y-2">
+                {card.news.map((n, i) => (
+                  <a
+                    key={i}
+                    href={n.url ?? "#"}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block text-sm rounded-lg border p-3 hover:bg-[var(--bg-elev-2)]"
+                    style={{ borderColor: "var(--border)" }}
+                  >
+                    {n.headline}
+                    {n.keywords.length > 0 && (
+                      <span className="block mt-1 text-[11px]" style={{ color: "var(--warn)" }}>
+                        {n.keywords.join(" · ")}
+                      </span>
+                    )}
+                  </a>
+                ))}
+              </div>
+            </div>
           </div>
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-center gap-2">
-            <span className="text-2xl">🔒</span>
-            <p className="text-sm font-medium">Pro unlocks full evidence + news snippets</p>
-          </div>
-        </div>
+        ) : (
+          <>
+            {/* Blurred teaser of the gated content */}
+            <div className="mt-4 relative">
+              <div className="space-y-2 select-none" style={{ filter: "blur(5px)", pointerEvents: "none" }}>
+                <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                  Raw evidence: volume ratio, exact price move, matched keywords.
+                </p>
+                {(card.news.length ? card.news : [{ headline: "Latest related headline preview", url: null, source: "news", keywords: [], published_at: null }]).map(
+                  (n, i) => (
+                    <div key={i} className="text-sm rounded-lg border p-3" style={{ borderColor: "var(--border)" }}>
+                      {n.headline}
+                    </div>
+                  ),
+                )}
+              </div>
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-center gap-2">
+                <span className="text-2xl">🔒</span>
+                <p className="text-sm font-medium">Pro unlocks full evidence + news snippets</p>
+              </div>
+            </div>
 
-        <button
-          onClick={upgrade}
-          disabled={busy}
-          className="mt-5 w-full py-2.5 rounded-xl font-medium transition-opacity disabled:opacity-60"
-          style={{ background: "var(--accent)", color: "white" }}
-        >
-          {busy ? "Starting checkout…" : "Upgrade to Pro"}
-        </button>
-        {msg && (
-          <p className="mt-3 text-xs text-center" style={{ color: "var(--warn)" }}>
-            {msg}
-          </p>
+            <button
+              onClick={upgrade}
+              disabled={busy}
+              className="mt-5 w-full py-2.5 rounded-xl font-medium transition-opacity disabled:opacity-60"
+              style={{ background: "var(--accent)", color: "white" }}
+            >
+              {busy ? "Starting checkout…" : "Upgrade to Pro"}
+            </button>
+            {msg && (
+              <p className="mt-3 text-xs text-center" style={{ color: "var(--warn)" }}>
+                {msg}
+              </p>
+            )}
+            <p className="mt-3 text-[11px] text-center" style={{ color: "var(--text-faint)" }}>
+              Test mode · card 4242 4242 4242 4242
+            </p>
+          </>
         )}
-        <p className="mt-3 text-[11px] text-center" style={{ color: "var(--text-faint)" }}>
-          Test mode · card 4242 4242 4242 4242
-        </p>
       </div>
     </div>
   );
@@ -259,6 +332,14 @@ export default function DigestClient({ initial }: { initial: Digest }) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modal, setModal] = useState<DigestCard | null>(null);
+  const [isPro, setIsPro] = useState(false);
+  const [canceled, setCanceled] = useState(false);
+
+  useEffect(() => {
+    setIsPro(localStorage.getItem("mekiki_pro") === "1");
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("checkout") === "canceled") setCanceled(true);
+  }, []);
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -306,6 +387,14 @@ export default function DigestClient({ initial }: { initial: Digest }) {
             </div>
           </div>
           <div className="ml-auto flex items-center gap-3">
+            {isPro && (
+              <span
+                className="text-[11px] font-semibold px-2 py-0.5 rounded-full"
+                style={{ color: "var(--accent)", background: "var(--accent-soft)" }}
+              >
+                PRO
+              </span>
+            )}
             <span className="text-xs hidden sm:inline" style={{ color: "var(--text-faint)" }}>
               scanned {scannedLabel}
             </span>
@@ -329,6 +418,16 @@ export default function DigestClient({ initial }: { initial: Digest }) {
             Ranked signals across abnormal volume, price swings, and news — refreshed every 30&nbsp;min.
           </p>
         </div>
+
+        {canceled && (
+          <div
+            className="mb-4 rounded-lg border px-4 py-3 text-sm flex items-center justify-between"
+            style={{ borderColor: "var(--border-strong)", background: "var(--bg-elev)", color: "var(--text-muted)" }}
+          >
+            <span>Checkout canceled — no charge was made.</span>
+            <button onClick={() => setCanceled(false)} style={{ color: "var(--text-faint)" }}>×</button>
+          </div>
+        )}
 
         {error && (
           <div
@@ -380,7 +479,7 @@ export default function DigestClient({ initial }: { initial: Digest }) {
         </footer>
       </main>
 
-      {modal && <ProModal card={modal} onClose={() => setModal(null)} />}
+      {modal && <ProModal card={modal} isPro={isPro} onClose={() => setModal(null)} />}
     </div>
   );
 }
