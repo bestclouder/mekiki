@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import type { Digest, DigestCard } from "@/lib/digest";
+import { createClient } from "@/lib/supabase/client";
 
 // ── formatting helpers ────────────────────────────────────────────────────
 function fmtPrice(n: number | null): string {
@@ -334,11 +336,33 @@ export default function DigestClient({ initial }: { initial: Digest }) {
   const [modal, setModal] = useState<DigestCard | null>(null);
   const [isPro, setIsPro] = useState(false);
   const [canceled, setCanceled] = useState(false);
+  const [email, setEmail] = useState<string | null>(null);
 
   useEffect(() => {
     setIsPro(localStorage.getItem("mekiki_pro") === "1");
     const params = new URLSearchParams(window.location.search);
     if (params.get("checkout") === "canceled") setCanceled(true);
+
+    // Reflect real auth + subscription state from the DB when signed in.
+    const supabase = createClient();
+    supabase.auth.getUser().then(async ({ data: { user } }) => {
+      if (!user) return;
+      setEmail(user.email ?? null);
+      const { data } = await supabase
+        .from("subscriptions")
+        .select("tier")
+        .eq("user_id", user.id)
+        .eq("tier", "pro")
+        .limit(1);
+      if (data && data.length > 0) setIsPro(true);
+    });
+  }, []);
+
+  const signOut = useCallback(async () => {
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    localStorage.removeItem("mekiki_pro");
+    window.location.reload();
   }, []);
 
   const refresh = useCallback(async () => {
@@ -407,6 +431,28 @@ export default function DigestClient({ initial }: { initial: Digest }) {
               <span className={refreshing ? "spin inline-block" : "inline-block"}>↻</span>
               {refreshing ? "Scanning…" : "Refresh"}
             </button>
+            {email ? (
+              <>
+                <span className="text-xs hidden md:inline max-w-[120px] truncate" style={{ color: "var(--text-muted)" }}>
+                  {email}
+                </span>
+                <button
+                  onClick={signOut}
+                  className="text-sm px-3 py-1.5 rounded-lg border transition-colors"
+                  style={{ borderColor: "var(--border-strong)", color: "var(--text-muted)" }}
+                >
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <Link
+                href="/login"
+                className="text-sm font-medium px-3 py-1.5 rounded-lg border transition-colors"
+                style={{ borderColor: "var(--border-strong)" }}
+              >
+                Sign in
+              </Link>
+            )}
           </div>
         </div>
       </header>
