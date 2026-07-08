@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emailTag } from "@/lib/pii";
 
 /**
  * Record a Pro subscription (High-risk create_subscription action per
@@ -43,7 +44,8 @@ export async function recordProSubscription(input: {
     status: "ok",
     risk_level: "high",
     triggered_by: input.triggeredBy,
-    output_summary: `tier=pro email=${input.email ?? "?"} session=${input.stripeSessionId}`,
+    // No raw PII in audit summaries — hashed email tag + Stripe session only.
+    output_summary: `tier=pro ${emailTag(input.email)} session=${input.stripeSessionId}`,
   });
 
   return { created: true, id: data.id };

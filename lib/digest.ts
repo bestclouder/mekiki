@@ -125,12 +125,12 @@ export async function getDigest(limit = 20): Promise<Digest> {
     }
   }
 
-  // Most recent ingestion run (for "scanned X min ago").
-  const { data: lastRun } = await db
-    .from("audit_logs")
-    .select("created_at")
-    .eq("action", "ingestion_run")
-    .order("created_at", { ascending: false })
+  // Most recent scan time — derived from public snapshot data, NOT audit_logs
+  // (which is locked from anonymous reads; see 0003_full_lockdown.sql).
+  const { data: lastSnap } = await db
+    .from("token_snapshots")
+    .select("fetched_at")
+    .order("fetched_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 
@@ -196,6 +196,6 @@ export async function getDigest(limit = 20): Promise<Digest> {
   return {
     cards,
     fetched_at: new Date().toISOString(),
-    last_run_at: lastRun?.created_at ?? null,
+    last_run_at: lastSnap?.fetched_at ?? null,
   };
 }
