@@ -46,11 +46,13 @@ function scoreColor(score: number): string {
 type Candle = { t: number; o: number; h: number; l: number; c: number };
 type CandleResp = { candles: Candle[]; granularity: string; source: string };
 
-const CH = 240; // chart height (px)
+const CH = 260; // chart height (px)
 const PAD_TOP = 10;
 const PAD_BOT = 22; // room for time labels
-const CANDLE_W = 4; // body width
-const CANDLE_GAP = 1;
+const CANDLE_W = 5; // body width
+const CANDLE_GAP = 2;
+const UP = "var(--pos)";
+const DOWN = "var(--neg)";
 
 function fmtTick(price: number): string {
   if (price >= 1000) return price.toLocaleString("en-US", { maximumFractionDigits: 0 });
@@ -130,8 +132,10 @@ function CandleChart({ card }: { card: DigestCard }) {
 
   // ~4 clean horizontal gridlines.
   const ticks = [0, 1, 2, 3].map((i) => lo + (span * i) / 3);
-  // Time labels every ~1/4 of the range.
-  const timeIdx = [0, 1, 2, 3].map((i) => Math.min(n - 1, Math.floor((n - 1) * (i / 3))));
+  // Time labels roughly every half-day across the 3.5-day window.
+  const timeIdx = [0, 1, 2, 3, 4, 5, 6, 7].map((i) =>
+    Math.min(n - 1, Math.floor((n - 1) * (i / 7))),
+  );
 
   const hovered = hover ? candles[hover.i] : null;
 
@@ -139,7 +143,9 @@ function CandleChart({ card }: { card: DigestCard }) {
     <div>
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-[10px] uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>
-          {granularity === "5m" ? "5-min candles · last 48h" : "hourly · last 48h (no 5-min feed for this token)"}
+          {granularity === "5m"
+            ? "5-min candles · last 3.5 days"
+            : "hourly candles · last 3.5 days (no 5-min feed for this token)"}
         </span>
         <span className="text-[10px]" style={{ color: "var(--text-faint)" }}>
           {source}
@@ -207,17 +213,42 @@ function CandleChart({ card }: { card: DigestCard }) {
               </text>
             ))}
 
-            {/* candles */}
+            {/* candlesticks — wick spans high→low, body spans open→close.
+                Up: hollow green (outline). Down: solid red. Color + fill style
+                together, so direction never rides on hue alone. */}
             {candles.map((c, i) => {
               const up = c.c >= c.o;
-              const color = up ? "var(--pos)" : "var(--neg)";
+              const color = up ? UP : DOWN;
               const cx = i * slot + CANDLE_W / 2;
               const bodyTop = y(Math.max(c.o, c.c));
-              const bodyH = Math.max(1, Math.abs(y(c.o) - y(c.c)));
+              const bodyH = Math.max(1.5, Math.abs(y(c.o) - y(c.c)));
               return (
                 <g key={c.t}>
-                  <line x1={cx} x2={cx} y1={y(c.h)} y2={y(c.l)} stroke={color} strokeWidth={1} />
-                  <rect x={i * slot} y={bodyTop} width={CANDLE_W} height={bodyH} fill={color} />
+                  {/* upper wick */}
+                  <line x1={cx} x2={cx} y1={y(c.h)} y2={bodyTop} stroke={color} strokeWidth={1} />
+                  {/* lower wick */}
+                  <line
+                    x1={cx}
+                    x2={cx}
+                    y1={bodyTop + bodyH}
+                    y2={y(c.l)}
+                    stroke={color}
+                    strokeWidth={1}
+                  />
+                  {/* body */}
+                  {up ? (
+                    <rect
+                      x={i * slot + 0.5}
+                      y={bodyTop}
+                      width={CANDLE_W - 1}
+                      height={bodyH}
+                      fill="var(--bg)"
+                      stroke={color}
+                      strokeWidth={1}
+                    />
+                  ) : (
+                    <rect x={i * slot} y={bodyTop} width={CANDLE_W} height={bodyH} fill={color} />
+                  )}
                 </g>
               );
             })}
