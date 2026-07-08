@@ -279,6 +279,55 @@ export async function runIngestion(): Promise<IngestResult> {
   }
   const marketById = new Map(markets.map((m) => [m.id, m]));
 
+  // ── Self-heal stale CoinGecko ids ────────────────────────────────────────
+  // CoinGecko occasionally renames coin ids (e.g. dogwifhat → dogwifcoin).
+  // A tracked token whose id returns no market data gets re-resolved via the
+  // search API (exact symbol match) and its row updated in place.
+  if (markets.length > 0) {
+    const stale = tokens.filter((t) => !marketById.has(t.coingecko_id)).slice(0, 3);
+    const healedIds: string[] = [];
+    for (const t of stale) {
+      try {
+        const res = await fetch(
+          `https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(t.name)}`,
+          { headers: { accept: "application/json" }, cache: "no-store" },
+        );
+        if (!res.ok) continue;
+        const { coins } = (await res.json()) as {
+          coins?: { id: string; symbol: string }[];
+        };
+        const match = coins?.find(
+          (c) => c.symbol.toLowerCase() === t.symbol.toLowerCase() && c.id !== t.coingecko_id,
+        );
+        if (!match) continue;
+        const { error } = await db
+          .from("tokens")
+          .update({ coingecko_id: match.id })
+          .eq("id", t.id);
+        if (!error) {
+          await logAudit(db, {
+            action: "heal_coingecko_id",
+            tool_used: "coingecko_fetch",
+            status: "ok",
+            output_summary: `${t.symbol}: ${t.coingecko_id} → ${match.id}`,
+          });
+          t.coingecko_id = match.id;
+          healedIds.push(match.id);
+        }
+      } catch {
+        // Non-fatal — token just misses this run.
+      }
+    }
+    if (healedIds.length > 0) {
+      try {
+        const healedMarkets = await fetchMarketsPage({ ids: healedIds });
+        for (const m of healedMarkets) marketById.set(m.id, m);
+      } catch {
+        // Healed rows will be picked up next run.
+      }
+    }
+  }
+
   // ── Upsert any newly-seen tokens so the whole top-100 is tracked ────────
   if (markets.length > 0) {
     const known = new Set(tokens.map((t) => t.coingecko_id));
