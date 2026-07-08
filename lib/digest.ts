@@ -50,10 +50,17 @@ export async function getDigest(limit = 10): Promise<Digest> {
     )
     .gte("triggered_at", sevenDaysAgo)
     .order("score", { ascending: false })
-    .limit(limit);
+    .limit(200);
 
   if (error) throw new Error(error.message);
-  const rows = signals ?? [];
+  // One card per token — its highest-scoring signal — then top N tokens by
+  // score ("Top 10 tokens by score → Digest", docs/INTELLIGENCE_LAYER.md).
+  const seen = new Set<string>();
+  const rows = (signals ?? []).filter((r) => {
+    if (!r.token_id || seen.has(r.token_id)) return false;
+    seen.add(r.token_id);
+    return true;
+  }).slice(0, limit);
   const tokenIds = [...new Set(rows.map((r) => r.token_id).filter(Boolean))];
 
   // Latest snapshot per token.

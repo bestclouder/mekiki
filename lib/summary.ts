@@ -97,8 +97,9 @@ async function openAiSummary(
 
 export async function generateSummary(
   input: SummaryInput,
+  opts: { allowAi?: boolean } = {},
 ): Promise<SummaryOutput> {
-  const ai = await openAiSummary(input);
+  const ai = opts.allowAi === false ? null : await openAiSummary(input);
   if (ai) return ai;
   return {
     summary: ruleBasedSummary(input),

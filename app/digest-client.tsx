@@ -461,7 +461,7 @@ export default function DigestClient({ initial }: { initial: Digest }) {
         <div className="mb-5">
           <h2 className="text-xl font-semibold">Today&apos;s movers</h2>
           <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
-            Ranked signals across abnormal volume, price swings, and news — refreshed every 30&nbsp;min.
+            Ranked signals across abnormal volume, price swings, and news — scanned daily, refresh live anytime.
           </p>
         </div>
 

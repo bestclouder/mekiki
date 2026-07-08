@@ -72,14 +72,28 @@ async function logAudit(
   }
 }
 
-/** Fetch live market data for the given CoinGecko ids. */
-async function fetchMarkets(ids: string[]): Promise<CoinGeckoMarket[]> {
-  if (ids.length === 0) return [];
+/**
+ * Fetch live market data: the CoinGecko top-100 by market cap (per
+ * docs/TASKS.md Sprint 1), plus any explicitly tracked ids not in the top-100.
+ */
+async function fetchMarkets(extraIds: string[]): Promise<CoinGeckoMarket[]> {
+  const top = await fetchMarketsPage({ perPage: 100 });
+  const have = new Set(top.map((m) => m.id));
+  const missing = extraIds.filter((id) => !have.has(id));
+  if (missing.length === 0) return top;
+  const extras = await fetchMarketsPage({ ids: missing });
+  return [...top, ...extras];
+}
+
+async function fetchMarketsPage(opts: {
+  ids?: string[];
+  perPage?: number;
+}): Promise<CoinGeckoMarket[]> {
   const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
   url.searchParams.set("vs_currency", "usd");
-  url.searchParams.set("ids", ids.join(","));
+  if (opts.ids) url.searchParams.set("ids", opts.ids.join(","));
   url.searchParams.set("order", "market_cap_desc");
-  url.searchParams.set("per_page", "250");
+  url.searchParams.set("per_page", String(opts.perPage ?? 250));
   url.searchParams.set("price_change_percentage", "24h");
   if (process.env.COINGECKO_API_KEY) {
     url.searchParams.set("x_cg_demo_api_key", process.env.COINGECKO_API_KEY);
@@ -247,7 +261,7 @@ export async function runIngestion(): Promise<IngestResult> {
   }
   const tokens = tracked ?? [];
 
-  // ── Fetch live market data ──────────────────────────────────────────────
+  // ── Fetch live market data (top-100 + tracked extras) ───────────────────
   let markets: CoinGeckoMarket[] = [];
   try {
     markets = await fetchMarkets(tokens.map((t) => t.coingecko_id));
@@ -264,6 +278,27 @@ export async function runIngestion(): Promise<IngestResult> {
     // Continue: we can still (re)derive news signals from existing data.
   }
   const marketById = new Map(markets.map((m) => [m.id, m]));
+
+  // ── Upsert any newly-seen tokens so the whole top-100 is tracked ────────
+  if (markets.length > 0) {
+    const known = new Set(tokens.map((t) => t.coingecko_id));
+    const newRows = markets
+      .filter((m) => !known.has(m.id))
+      .map((m) => ({
+        symbol: m.symbol.toUpperCase(),
+        name: m.name,
+        coingecko_id: m.id,
+        is_tracked: true,
+      }));
+    if (newRows.length > 0) {
+      const { data: inserted, error } = await db
+        .from("tokens")
+        .upsert(newRows, { onConflict: "coingecko_id", ignoreDuplicates: true })
+        .select("id, symbol, name, coingecko_id");
+      if (error) errors.push(`tokens upsert: ${error.message}`);
+      else if (inserted) tokens.push(...inserted);
+    }
+  }
 
   // ── Upsert snapshots ────────────────────────────────────────────────────
   const nowIso = new Date().toISOString();
@@ -394,15 +429,23 @@ export async function runIngestion(): Promise<IngestResult> {
   }
 
   // ── Generate summaries + insert ─────────────────────────────────────────
+  // AI summaries only for the top-scored signals (the ones the Digest shows);
+  // the long tail gets the instant rule-based sentence. Keeps the run inside
+  // the 60s function budget even with ~100 tokens scanned.
+  const AI_SUMMARY_LIMIT = 12;
+  allSignals.sort((a, b) => b.score - a.score);
   const rows = [];
-  for (const s of allSignals) {
-    const { summary, source, confidence } = await generateSummary({
-      symbol: s.symbol,
-      name: s.name,
-      signalType: s.signal_type,
-      score: s.score,
-      evidence: s.evidence,
-    });
+  for (const [i, s] of allSignals.entries()) {
+    const { summary, source, confidence } = await generateSummary(
+      {
+        symbol: s.symbol,
+        name: s.name,
+        signalType: s.signal_type,
+        score: s.score,
+        evidence: s.evidence,
+      },
+      { allowAi: i < AI_SUMMARY_LIMIT },
+    );
     rows.push({
       token_id: s.token_id,
       signal_type: s.signal_type,
